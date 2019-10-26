@@ -34,8 +34,29 @@
 #include <string.h>
 #include <fcntl.h>
 #include <errno.h>
-#include <netdb.h>
 #include <getopt.h>
+
+#ifdef _WIN32
+#include <winsock2.h>
+#include <stdint.h>
+
+typedef uint32_t uid_t;
+typedef uint32_t gid_t;
+
+struct sockaddr_un {
+   u_short sun_family;
+   char    sun_path[108];
+};
+
+struct utsname_computer_name_masquerade {
+    char nodename[MAX_COMPUTERNAME_LENGTH + 1];
+};
+
+static int poll(struct pollfd * fds, size_t nfds, int timeout) {
+    return WSAPoll(fds, nfds, timeout);
+}
+#else
+#include <netdb.h>
 
 #include <signal.h>
 #include <sys/stat.h>
@@ -66,6 +87,7 @@
 #  include <resolv.h>
 #endif
 #include <netdb.h>
+#endif
 
 #ifndef RUSAGE_SELF
 #  define RUSAGE_SELF (0)
@@ -187,12 +209,20 @@ public:
         job = 0;
 
         if (pipe_from_child >= 0) {
+#ifdef _WIN32
+            if (0 == CloseHandle((HANDLE)(INT_PTR)pipe_from_child)){
+#else
             if (-1 == close(pipe_from_child) && (errno != EBADF)){
+#endif
                 log_perror("Failed to close pipe from child process");
             }
         }
         if (pipe_to_child >= 0) {
+#ifdef _WIN32
+            if (0 == CloseHandle((HANDLE)(INT_PTR)pipe_to_child)){
+#else
             if (-1 == close(pipe_to_child) && (errno != EBADF)){
+#endif
                 log_perror("Failed to close pipe to child process");
             }
         }
@@ -334,6 +364,10 @@ public:
 
 static int set_new_pgrp(void)
 {
+#ifdef _WIN32
+    log_error() << "set_new_pgrp()\n";
+    return 0;
+#else
     /* If we're a session group leader, then we are not able to call
      * setpgid().  However, setsid will implicitly have put us into a new
      * process group, so we don't have to do anything. */
@@ -359,6 +393,7 @@ static int set_new_pgrp(void)
 
     trace() << "setpgid(0, 0) failed: " << strerror(errno) << endl;
     return EXIT_DISTCC_FAILED;
+#endif
 }
 
 static void dcc_daemon_terminate(int);
@@ -374,7 +409,9 @@ void dcc_daemon_catch_signals(void)
 
     signal(SIGTERM, &dcc_daemon_terminate);
     signal(SIGINT, &dcc_daemon_terminate);
+#ifdef SIGALRM
     signal(SIGALRM, &dcc_daemon_terminate);
+#endif
 }
 
 pid_t dcc_master_pid;
@@ -406,7 +443,12 @@ static void dcc_daemon_terminate(int whichsig)
 
     if (am_parent && exit_main_loop == 0) {
         /* kill whole group */
+#ifdef _WIN32
+        int kill_res = TerminateProcess(GetCurrentProcess(), whichsig);
+        log_error() << "killing whole group: " << kill_res << '\n';
+#else
         kill(0, whichsig);
+#endif
 
         /* Remove pid file */
         unlink(pidFilePath.c_str());
@@ -493,6 +535,10 @@ struct Daemon {
 
     Daemon() {
         warn_icecc_user_errno = 0;
+#ifdef _WIN32
+        user_uid = 65534;
+        user_gid = 65533;
+#else
         if (getuid() == 0) {
             struct passwd *pw = getpwnam("icecc");
 
@@ -508,6 +554,7 @@ struct Daemon {
             user_uid = getuid();
             user_gid = getgid();
         }
+#endif
 
         envbasedir = "/var/tmp/icecc-envs";
         tcp_listen_fd = -1;
@@ -609,7 +656,7 @@ bool Daemon::setup_listen_tcp_fd( int& fd, const string& interface )
     }
 
     int optval = 1;
-    if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval)) < 0) {
+    if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, (const char *) &optval, sizeof(optval)) < 0) {
         log_perror("Failed to set 'Reuse Address(SO_REUSEADDR)' option on TCP Listen Socket");
         return false;
     }
@@ -638,7 +685,11 @@ bool Daemon::setup_listen_tcp_fd( int& fd, const string& interface )
         return false;
     }
 
+#ifdef _WIN32
+    log_error() << "setup_listen_tcp_fd(): fcntl(fd, F_SETFD, FD_CLOEXEC)\n";
+#else
     fcntl(fd, F_SETFD, FD_CLOEXEC);
+#endif
     return true;
 }
 
@@ -659,17 +710,21 @@ bool Daemon::setup_listen_unix_fd()
     mode_t old_umask = 0;
 
     if (getenv("ICECC_TEST_SOCKET") == NULL) {
+#ifdef _WIN32
+        if (false) {
+#else
 #ifdef HAVE_LIBCAP_NG
         // We run as system daemon (UID has been already changed).
         if (capng_have_capability( CAPNG_EFFECTIVE, CAP_SYS_CHROOT )) {
 #else
         if (getuid() == 0) {
 #endif
+#endif
             string default_socket = "/var/run/icecc/iceccd.socket";
             strncpy(myaddr.sun_path, default_socket.c_str() , sizeof(myaddr.sun_path) - 1);
             myaddr.sun_path[sizeof(myaddr.sun_path) - 1] = '\0';
             if(default_socket.length() > sizeof(myaddr.sun_path) - 1) {
-                log_error() << "default socket path too long for sun_path" << endl;	
+                log_error() << "default socket path too long for sun_path" << endl;
             }
             if (-1 == unlink(myaddr.sun_path) && errno != ENOENT){
                 log_perror("unlink failed") << "\t" << myaddr.sun_path << endl;
@@ -724,19 +779,33 @@ bool Daemon::setup_listen_unix_fd()
         return false;
     }
 
+#ifdef _WIN32
+    log_error() << "setup_listen_unix_fd(): fcntl(unix_listen_fd, F_SETFD, FD_CLOEXEC)\n";
+#else
     fcntl(unix_listen_fd, F_SETFD, FD_CLOEXEC);
+#endif
 
     return true;
 }
 
 void Daemon::determine_system()
 {
+#ifdef _WIN32
+    utsname_computer_name_masquerade uname_buf;
+    DWORD nodename_len = sizeof(uname_buf.nodename);
+
+    if (!GetComputerNameA(uname_buf.nodename, &nodename_len)) {
+        log_perror("GetComputerNameA call failed. Unable to determine system node name and platform");
+        return;
+    }
+#else
     struct utsname uname_buf;
 
     if (uname(&uname_buf)) {
         log_perror("uname call failed. Unable to determine system node name and platform");
         return;
     }
+#endif
 
     if (nodename.length() && (nodename != uname_buf.nodename)) {
         custom_nodename  = true;
@@ -755,12 +824,21 @@ string Daemon::determine_nodename()
         return nodename;
     }
 
+#ifdef _WIN32
+    utsname_computer_name_masquerade uname_buf;
+    DWORD nodename_len = sizeof(uname_buf.nodename);
+
+    if (GetComputerNameA(uname_buf.nodename, &nodename_len)) {
+        nodename = uname_buf.nodename;
+    }
+#else
     // perhaps our host name changed due to network change?
     struct utsname uname_buf;
 
     if (!uname(&uname_buf)) {
         nodename = uname_buf.nodename;
     }
+#endif
 
     return nodename;
 }
@@ -852,6 +930,8 @@ bool Daemon::maybe_stats(bool force_check)
         /* idle time could have been used for icecream, so claim it */
         icecream_load += idleLoad * diff_stat / 1000;
 
+#ifdef _WIN32
+#else
         /* add the time of our childrens, but only the time since the last run */
         struct rusage ru;
 
@@ -869,6 +949,7 @@ bool Daemon::maybe_stats(bool force_check)
             icecream_usage.tv_sec = ru.ru_utime.tv_sec;
             icecream_usage.tv_usec = ru.ru_utime.tv_usec;
         }
+#endif
 
         unsigned int idle_average = icecream_load;
 
@@ -1128,7 +1209,11 @@ bool Daemon::handle_file_chunk_env(Client *client, Msg *msg)
 
     if (msg->type == M_END) {
         trace() << "received end of environment, waiting for child" << endl;
+#ifdef _WIN32
+        CloseHandle((HANDLE)(INT_PTR)client->pipe_to_child);
+#else
         close(client->pipe_to_child);
+#endif
         client->pipe_to_child = -1;
         if( client->child_pid >= 0 ) {
             // Transfer done, wait for handle_transfer_env_child_done() to finish the handling.
@@ -1167,7 +1252,11 @@ bool Daemon::handle_env_install_child_done(Client *client)
     assert(current_kids > 0);
     current_kids--;
     if (client->pipe_from_child >= 0) {
+#ifdef _WIN32
+        CloseHandle((HANDLE)(INT_PTR)client->pipe_from_child);
+#else
         close(client->pipe_from_child);
+#endif
         client->pipe_from_child = -1;
     }
     if( !success )
@@ -1191,21 +1280,38 @@ bool Daemon::finish_transfer_env(Client *client, bool cancel)
 
     if (client->pipe_from_child >= 0) {
         assert( cancel ); // If not cancelled, this is closed by handle_env_install_child_done().
+#ifdef _WIN32
+        CloseHandle((HANDLE)(INT_PTR)client->pipe_from_child);
+#else
         close(client->pipe_from_child);
+#endif
         client->pipe_from_child = -1;
     }
     if (client->pipe_to_child >= 0) {
         assert( cancel ); // If not cancelled, this is closed by handle_file_chunk_env().
+#ifdef _WIN32
+        CloseHandle((HANDLE)(INT_PTR)client->pipe_to_child);
+#else
         close(client->pipe_to_child);
+#endif
         client->pipe_to_child = -1;
     }
     if (client->child_pid >= 0 ) {
         assert( cancel ); // If not cancelled, this is handled by handle_env_install_child_done().
+#ifdef _WIN32
+        int kill_res = TerminateProcess((HANDLE) client->child_pid, SIGTERM);
+        log_error() << "killing child " << client->child_pid << ": " << kill_res << '\n';
+#else
         kill( client->child_pid, SIGTERM );
-        int status;
+#endif
         trace() << "finish_transfer_env kill and waiting for child PID " << client->child_pid <<endl;
+#ifdef _WIN32
+        WaitForSingleObject((HANDLE) client->child_pid, INFINITE);
+#else
+        int status;
         while (waitpid(client->child_pid, &status, 0) < 0 && errno == EINTR)
             ;
+#endif
         client->child_pid = -1;
         assert(current_kids > 0);
         current_kids--;
@@ -1599,7 +1705,11 @@ bool Daemon::handle_compile_done(Client *client)
         msg->pfaults = job_stat[JobStatistics::sys_pfaults];
     }
 
+#ifdef _WIN32
+    CloseHandle((HANDLE)(INT_PTR)client->pipe_from_child);
+#else
     close(client->pipe_from_child);
+#endif
     client->pipe_from_child = -1;
     string envforjob = client->job->targetPlatform() + "/" + client->job->environmentVersion();
     envs_last_use[envforjob] = time(NULL);
@@ -1764,14 +1874,22 @@ void Daemon::clear_children()
 {
     while (!clients.empty()) {
         Client *cl = clients.first();
+#ifdef _WIN32
+        int kill_res = TerminateProcess((HANDLE) cl->child_pid, SIGTERM);
+        log_error() << "killing child " << cl->child_pid << " in lieu of waitpid(-1): " << kill_res << '\n';
+        WaitForSingleObject((HANDLE) cl->child_pid, INFINITE);
+#endif
         handle_end(cl, 116);
     }
 
     while (current_kids > 0) {
+#ifdef _WIN32
+#else
         int status;
         pid_t child;
 
         while ((child = waitpid(-1, &status, 0)) < 0 && errno == EINTR) {}
+#endif
 
         current_kids--;
     }
@@ -1895,10 +2013,13 @@ void Daemon::answer_client_requests()
 
 #endif
 
+#ifdef _WIN32
+#else
     /* reap zombis */
     int status;
 
     while (waitpid(-1, &status, WNOHANG) < 0 && errno == EINTR) {}
+#endif
 
     handle_old_request();
 
@@ -2372,6 +2493,9 @@ int main(int argc, char **argv)
         case 'u':
 
             if (optarg && *optarg) {
+#ifdef _WIN32
+                usage("Error: -u not supported on Windows");
+#else
                 struct passwd *pw = getpwnam(optarg);
 
                 if (!pw) {
@@ -2385,6 +2509,7 @@ int main(int argc, char **argv)
                         usage("Error: -u <username> must not be root");
                     }
                 }
+#endif
             } else {
                 usage("Error: -u requires a valid username");
             }
@@ -2429,17 +2554,34 @@ int main(int argc, char **argv)
     umask(022);
 
     bool remote_disabled = false;
+#ifdef _WIN32
+    if (true) {
+        char temp_dir[MAX_PATH + 1];
+        GetTempPathA(sizeof(temp_dir), temp_dir);
+#else
     if (getuid() == 0) {
+#endif
         if (!logfile.length() && detach) {
+#ifdef _WIN32
+            logfile = temp_dir;
+            logfile += "log/icecc";
+            mkdir(logfile.c_str());
+            logfile += "/icecc.log";
+#else
             mkdir("/var/log/icecc", S_IRWXU | S_IRGRP | S_IXGRP | S_IROTH | S_IXOTH);
             chmod("/var/log/icecc", S_IRWXU | S_IRGRP | S_IXGRP | S_IROTH | S_IXOTH);
             ignore_result(chown("/var/log/icecc", d.user_uid, d.user_gid));
             logfile = "/var/log/icecc/iceccd.log";
+#endif
         }
 
+#ifdef _WIN32
+        mkdir((std::string(temp_dir) + "log/icecc").c_str());
+#else
         mkdir("/var/run/icecc", S_IRWXU | S_IRGRP | S_IXGRP | S_IROTH | S_IXOTH);
         chmod("/var/run/icecc", S_IRWXU | S_IRGRP | S_IXGRP | S_IROTH | S_IXOTH);
         ignore_result(chown("/var/run/icecc", d.user_uid, d.user_gid));
+#endif
 
 #ifdef HAVE_LIBCAP_NG
         capng_clear(CAPNG_SELECT_BOTH);
@@ -2481,7 +2623,11 @@ int main(int argc, char **argv)
     }
 
     if (detach)
+#ifdef _WIN32
+        if (true) {
+#else
         if (daemon(0, 0)) {
+#endif
             log_perror("Failed to run as a daemon.");
             exit(EXIT_DISTCC_FAILED);
         }
@@ -2513,15 +2659,19 @@ int main(int argc, char **argv)
     /* Don't catch signals until we've detached or created a process group. */
     dcc_daemon_catch_signals();
 
+#ifdef SIGPIPE
     if (signal(SIGPIPE, SIG_IGN) == SIG_ERR) {
         log_warning() << "signal(SIGPIPE, ignore) failed: " << strerror(errno) << endl;
         exit(EXIT_DISTCC_FAILED);
     }
+#endif
 
+#ifdef SIGCHLD
     if (signal(SIGCHLD, SIG_DFL) == SIG_ERR) {
         log_warning() << "signal(SIGCHLD) failed: " << strerror(errno) << endl;
         exit(EXIT_DISTCC_FAILED);
     }
+#endif
 
     /* This is called in the master daemon, whether that is detached or
      * not.  */

@@ -33,14 +33,116 @@
 #include <signal.h>
 #include <cassert>
 
-#include <sys/stat.h>
-#include <sys/types.h>
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#include <winsock2.h>
+#include <namedpipeapi.h>
+#include <stdint.h>
+
+typedef uint32_t uid_t;
+typedef uint32_t gid_t;
+
+// Based on https://gist.github.com/Cr4sh/126d844c28a7fbfd25c6
+/*
+ * fork.c
+ * Experimental fork() on Windows.  Requires NT 6 subsystem or
+ * newer.
+ *
+ * Copyright (c) 2012 William Pitcock <nenolod@dereferenced.org>
+ *
+ * Permission to use, copy, modify, and/or distribute this software for any
+ * purpose with or without fee is hereby granted, provided that the above
+ * copyright notice and this permission notice appear in all copies.
+ *
+ * This software is provided 'as is' and without any warranty, express or
+ * implied.  In no event shall the authors be liable for any damages arising
+ * from the use of this software.
+ */
+
+#include <winnt.h>
+#include <winternl.h>
+
+typedef struct _SECTION_IMAGE_INFORMATION {
+    PVOID EntryPoint;
+    ULONG StackZeroBits;
+    ULONG StackReserved;
+    ULONG StackCommit;
+    ULONG ImageSubsystem;
+    WORD SubSystemVersionLow;
+    WORD SubSystemVersionHigh;
+    ULONG Unknown1;
+    ULONG ImageCharacteristics;
+    ULONG ImageMachineType;
+    ULONG Unknown2[3];
+} SECTION_IMAGE_INFORMATION, *PSECTION_IMAGE_INFORMATION;
+
+typedef struct _RTL_USER_PROCESS_INFORMATION {
+    ULONG Size;
+    HANDLE Process;
+    HANDLE Thread;
+    CLIENT_ID ClientId;
+    SECTION_IMAGE_INFORMATION ImageInformation;
+} RTL_USER_PROCESS_INFORMATION, *PRTL_USER_PROCESS_INFORMATION;
+
+#define RTL_CLONE_PROCESS_FLAGS_CREATE_SUSPENDED    0x00000001
+#define RTL_CLONE_PROCESS_FLAGS_INHERIT_HANDLES     0x00000002
+#define RTL_CLONE_PROCESS_FLAGS_NO_SYNCHRONIZE      0x00000004
+
+#define RTL_CLONE_PARENT                0
+#define RTL_CLONE_CHILD                 297
+
+typedef NTSTATUS (*RtlCloneUserProcess_f)(ULONG ProcessFlags,
+    PSECURITY_DESCRIPTOR ProcessSecurityDescriptor /* optional */,
+    PSECURITY_DESCRIPTOR ThreadSecurityDescriptor /* optional */,
+    HANDLE DebugPort /* optional */,
+    PRTL_USER_PROCESS_INFORMATION ProcessInformation);
+
+static pid_t fork(void)
+{
+    static auto mod = GetModuleHandle("ntdll.dll");
+    static auto clone_p = (RtlCloneUserProcess_f)(void *)GetProcAddress(mod, "RtlCloneUserProcess");
+
+    if (!mod)
+        return -ENOSYS;
+
+    if (clone_p == NULL)
+        return -ENOSYS;
+
+    /* lets do this */
+    RTL_USER_PROCESS_INFORMATION process_info;
+    auto result = clone_p(RTL_CLONE_PROCESS_FLAGS_CREATE_SUSPENDED | RTL_CLONE_PROCESS_FLAGS_INHERIT_HANDLES, NULL, NULL, NULL, &process_info);
+
+    if (result == RTL_CLONE_PARENT) {
+        auto pi = (DWORD)(UINT_PTR)process_info.ClientId.UniqueProcess;
+        auto ti = (DWORD)(UINT_PTR)process_info.ClientId.UniqueThread;
+
+        auto hp = OpenProcess(PROCESS_ALL_ACCESS, FALSE, pi);
+        auto ht = OpenThread(THREAD_ALL_ACCESS, FALSE, ti);
+        assert(hp);
+        assert(ht);
+
+        ResumeThread(ht);
+        CloseHandle(ht);
+        CloseHandle(hp);
+        return (pid_t)pi;
+    } else if (result == RTL_CLONE_CHILD) {
+        /* fix stdio */
+        AllocConsole();
+        return 0;
+    } else
+        return -1;
+}
+#else
 #include <sys/wait.h>
 #ifdef HAVE_SYS_SIGNAL_H
 #  include <sys/signal.h>
 #endif /* HAVE_SYS_SIGNAL_H */
 #include <sys/param.h>
 #include <unistd.h>
+#endif
+#include <sys/types.h>
+#include <sys/stat.h>
 
 #include <job.h>
 #include <comm.h>
@@ -65,8 +167,21 @@
 #define O_LARGEFILE 0
 #endif
 
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+
+static char temp_dir_path[MAX_PATH + 1] = {0};
+
+static void prep_temp_dir_path(void) {
+    DWORD len = GetTempPathA(sizeof(temp_dir_path), temp_dir_path);
+    temp_dir_path[len - 1] = '\0';
+}
+#else
 #ifndef _PATH_TMP
 #define _PATH_TMP "/tmp"
+#endif
+static char temp_dir_path[] = _PATH_TMP;
 #endif
 
 using namespace std;
@@ -134,36 +249,59 @@ static void write_output_file( const string& file, MsgChannel* client )
 /**
  * Read a request, run the compiler, and send a response.
  **/
-int handle_connection(const string &basedir, CompileJob *job,
-                      MsgChannel *client, int &out_fd,
-                      unsigned int mem_limit, uid_t user_uid, gid_t user_gid)
+pid_t handle_connection(const string &basedir, CompileJob *job,
+                        MsgChannel *client, int &out_fd,
+                        unsigned int mem_limit, uid_t user_uid, gid_t user_gid)
 {
+#ifdef _WIN32
+    HANDLE socket[2];
+
+    if (CreatePipe(&socket[0], &socket[1], nullptr, 0) == 0) {
+        log_perror("pipe failed");
+        return -1;
+    }
+#else
     int socket[2];
 
     if (pipe(socket) == -1) {
         log_perror("pipe failed");
         return -1;
     }
+#endif
 
     flush_debug();
     pid_t pid = fork();
     assert(pid >= 0);
 
     if (pid > 0) {  // parent
+#ifdef _WIN32
+        if (0 == CloseHandle(socket[1])){
+#else
         if ((-1 == close(socket[1])) && (errno != EBADF)){
+#endif
             log_perror("close failure");
         }
-        out_fd = socket[0];
+        out_fd = (INT_PTR)socket[0];
+#ifdef _WIN32
+#else
         fcntl(out_fd, F_SETFD, FD_CLOEXEC);
+#endif
         return pid;
     }
 
     reset_debug();
+#ifdef _WIN32
+    if (0 == CloseHandle(socket[0])){
+#else
     if ((-1 == close(socket[0])) && (errno != EBADF)){
+#endif
         log_perror("close failed");
     }
-    out_fd = socket[1];
+    out_fd = (INT_PTR)socket[1];
 
+#ifdef _WIN32
+    /* if CreatePipe(lpPipeAttributes == null), as above, the handle cannot be inherited */
+#else
     /* internal communication channel, don't inherit to gcc */
     fcntl(out_fd, F_SETFD, FD_CLOEXEC);
 
@@ -172,6 +310,7 @@ int handle_connection(const string &basedir, CompileJob *job,
         log_warning() << "failed to set nice value: " << strerror(errno)
                       << endl;
     }
+#endif
 
     string tmp_path, obj_file, dwo_file;
     int exit_code = 0;
@@ -194,9 +333,11 @@ int handle_connection(const string &basedir, CompileJob *job,
             throw myexception(EXIT_DISTCC_FAILED);
         }
 
-        if (::access(_PATH_TMP + 1, W_OK) < 0) {
-            error_client(client, "can't write to " _PATH_TMP);
-            log_error() << "can't write into " << _PATH_TMP << " " << strerror(errno) << endl;
+        if(temp_dir_path[0] == '\0')
+            prep_temp_dir_path();
+        if (::access(temp_dir_path + 1, W_OK) < 0) {
+            error_client(client, std::string("can't write to ") + temp_dir_path);
+            log_error() << "can't write into " << temp_dir_path << " " << strerror(errno) << endl;
             throw myexception(-1);
         }
 
@@ -286,11 +427,11 @@ int handle_connection(const string &basedir, CompileJob *job,
             }
         }
 
-        struct stat st;
-        if (stat(obj_file.c_str(), &st) == 0) {
+        struct _stat st;
+        if (_stat(obj_file.c_str(), &st) == 0) {
             job_stat[JobStatistics::out_uncompressed] += st.st_size;
         }
-        if (stat(dwo_file.c_str(), &st) == 0) {
+        if (_stat(dwo_file.c_str(), &st) == 0) {
             job_stat[JobStatistics::out_uncompressed] += st.st_size;
             rmsg.have_dwo_file = true;
         } else

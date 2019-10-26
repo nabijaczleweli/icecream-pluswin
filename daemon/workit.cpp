@@ -27,12 +27,14 @@
 #include "assert.h"
 #include "exitcode.h"
 #include "logging.h"
+#ifdef _WIN32
+//#define WIN32_LEAN_AND_MEAN
+//#include <windows.h>
+// #include <winsock2.h>
+#include <namedpipeapi.h>
+//#include <stdint.h>
+#else
 #include <sys/select.h>
-#include <algorithm>
-
-#ifdef __FreeBSD__
-#include <sys/param.h>
-#endif
 
 /* According to earlier standards */
 #include <sys/time.h>
@@ -40,12 +42,19 @@
 #include <unistd.h>
 #include <sys/fcntl.h>
 #include <sys/wait.h>
-#include <signal.h>
 #include <sys/resource.h>
 #if HAVE_SYS_USER_H && !defined(__DragonFly__)
 #  include <sys/user.h>
 #endif
 #include <sys/socket.h>
+#endif
+#include <algorithm>
+
+#ifdef __FreeBSD__
+#include <sys/param.h>
+#endif
+
+#include <signal.h>
 
 #ifdef HAVE_SYS_VFS_H
 #include <sys/vfs.h>
@@ -119,11 +128,33 @@ int work_it(CompileJob &j, unsigned int job_stat[], MsgChannel *client, CompileR
     }
     trace() << "remote compile arguments:" << argstxt << endl;
 
+#ifdef _WIN32
+    HANDLE sock_err[2];
+    HANDLE sock_out[2];
+    HANDLE main_sock[2];
+    HANDLE death_pipe_lcl[2];
+
+    if (CreatePipe(&sock_err[0], &sock_err[1], nullptr, 0) == 0) {
+        return EXIT_DISTCC_FAILED;
+    }
+
+    if (CreatePipe(&sock_out[0], &sock_out[1], nullptr, 0) == 0) {
+        return EXIT_DISTCC_FAILED;
+    }
+
+    if (CreatePipe(&main_sock[0], &main_sock[1], nullptr, 0) == 0) {
+        return EXIT_DISTCC_FAILED;
+    }
+
+    if (CreatePipe(&death_pipe_lcl[0], &death_pipe_lcl[1], nullptr, 0) == 0) {
+        return EXIT_DISTCC_FAILED;
+    }
+    death_pipe[0] = (INT_PTR)death_pipe_lcl[0];
+    death_pipe[1] = (INT_PTR)death_pipe_lcl[1];
+#else
     int sock_err[2];
     int sock_out[2];
-    int sock_in[2];
     int main_sock[2];
-    char buffer[4096];
 
     if (pipe(sock_err)) {
         return EXIT_DISTCC_FAILED;
@@ -140,6 +171,9 @@ int work_it(CompileJob &j, unsigned int job_stat[], MsgChannel *client, CompileR
     if (pipe(death_pipe)) {
         return EXIT_DISTCC_FAILED;
     }
+#endif
+    int sock_in[2];
+    char buffer[4096];
 
     // We use a socket pair instead of a pipe to get a "slightly" bigger
     // output buffer. This saves context switches and latencies.
