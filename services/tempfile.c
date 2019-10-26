@@ -47,8 +47,62 @@
 #include "tempfile.h"
 #include "exitcode.h"
 
+
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+
+static char temp_dir_path[MAX_PATH + 1] = {0};
+
+static void prep_temp_dir_path(void) {
+    DWORD len = GetTempPathA(sizeof(temp_dir_path), temp_dir_path);
+    temp_dir_path[len - 1] = '\0';
+}
+
+static char * mkdtemp(char * template) {
+    unsigned int len = strlen(template);
+    for(unsigned int i = len - 7; i < len; ++i) {
+        if(template[i] != 'X') {
+            errno = EINVAL;
+            return NULL;
+        }
+    }
+
+    char * buf = malloc(len + 1);
+    if(!buf) {
+        errno = ENOMEM;
+        return NULL;
+    }
+
+    // From below
+    unsigned long random_bits = (unsigned long) getpid() << 16;
+
+    {
+        struct timeval tv;
+        gettimeofday(&tv, NULL);
+        random_bits ^= tv.tv_usec << 16;
+        random_bits ^= tv.tv_sec;
+    }
+
+    strncpy(buf, template, len + 1);
+    snprintf(buf + len - 7, 6, "%06x", (unsigned int) (random_bits & 0xFFFFFF));
+
+    if(mkdir(buf) < 0) {
+        free(buf);
+        return NULL;
+    }
+
+    strncpy(template, buf, len + 1);
+    free(buf);
+    return template;
+}
+#else
 #ifndef _PATH_TMP
 #define _PATH_TMP "/tmp"
+#endif
+static char temp_dir_path[] = _PATH_TMP;
+
+static void prep_temp_dir_path(void) {}
 #endif
 
 
@@ -67,7 +121,10 @@ int dcc_make_tmpnam(const char *prefix, const char *suffix, char **name_ret, int
     size_t tmpname_length;
     char *tmpname;
 
-    tmpname_length = strlen(_PATH_TMP) + 1 + strlen(prefix) + 1 + 8 + strlen(suffix) + 1;
+    if(temp_dir_path[0] == '\0')
+        prep_temp_dir_path();
+
+    tmpname_length = strlen(temp_dir_path) + 1 + strlen(prefix) + 1 + 8 + strlen(suffix) + 1;
     tmpname = malloc(tmpname_length);
 
     if (!tmpname) {
@@ -89,7 +146,7 @@ int dcc_make_tmpnam(const char *prefix, const char *suffix, char **name_ret, int
 
     do {
         if (snprintf(tmpname, tmpname_length, "%s/%s_%08lx%s",
-                     (relative ? _PATH_TMP + 1 : _PATH_TMP),
+                     (relative ? temp_dir_path + 1 : temp_dir_path),
                      prefix,
                      random_bits & 0xffffffffUL,
                      suffix) == -1) {
@@ -144,16 +201,19 @@ int dcc_make_tmpnam(const char *prefix, const char *suffix, char **name_ret, int
 }
 
 int dcc_make_tmpdir(char **name_ret) {
+    if(temp_dir_path[0] == '\0')
+        prep_temp_dir_path();
+
     unsigned long tries = 0;
     char template[] = "icecc-XXXXXX";
-    size_t tmpname_length = strlen(_PATH_TMP) + 1 + strlen(template) + 1;
+    size_t tmpname_length = strlen(temp_dir_path) + 1 + strlen(template) + 1;
     char *tmpname = malloc(tmpname_length);
 
     if (!tmpname) {
         return EXIT_OUT_OF_MEMORY;
     }
 
-    if (snprintf(tmpname, tmpname_length, "%s/%s", _PATH_TMP, template) == -1) {
+    if (snprintf(tmpname, tmpname_length, "%s/%s", temp_dir_path, template) == -1) {
         free(tmpname);
         return EXIT_OUT_OF_MEMORY;
     }

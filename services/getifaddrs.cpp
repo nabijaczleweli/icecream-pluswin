@@ -29,13 +29,20 @@
 #include "getifaddrs.h"
 #include "logging.h"
 
+#ifdef _WIN32
+#include <winsock2.h>
+#else
 #include <netinet/in.h>
+#endif
 
 #ifndef HAVE_IFADDRS_H
 
+#ifdef _WIN32
+#else
 #include <net/if.h>
 #include <sys/socket.h>
 #include <sys/ioctl.h>
+#endif
 #include <unistd.h>
 #include <stdlib.h>
 #include <string.h>
@@ -285,7 +292,6 @@ int kde_getifaddrs(struct kde_ifaddrs **)
 void kde_freeifaddrs(struct kde_ifaddrs *)
 {
 }
-struct { } kde_ifaddrs;
 
 #endif
 
@@ -309,7 +315,7 @@ bool build_address_for_interface(struct sockaddr_in &myaddr, const std::string &
     }
 
     // Otherwise, search for the IP address of the given interface
-    struct kde_ifaddrs *addrs;
+    struct kde_ifaddrs *addrs = NULL;
 
     if (kde_getifaddrs(&addrs) < 0) {
         log_perror("kde_getifaddrs()");

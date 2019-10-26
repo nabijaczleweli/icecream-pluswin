@@ -22,7 +22,11 @@
 #define ICECREAM_UTIL_H
 
 #include <string>
+#ifdef _WIN32
+#include <winsock2.h>
+#else
 #include <sys/poll.h>
+#endif
 #include <vector>
 
 extern std::string find_basename(const std::string &sfile);

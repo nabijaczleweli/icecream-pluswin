@@ -25,6 +25,11 @@
 #ifndef ICECREAM_COMM_H
 #define ICECREAM_COMM_H
 
+#ifdef _WIN32
+#include <winsock2.h>
+typedef int socklen_t;
+#undef ERROR
+#else
 #ifdef __linux__
 #  include <stdint.h>
 #endif
@@ -32,7 +37,9 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#endif
 
+#include <time.h>
 #include "job.h"
 
 // if you increase the PROTOCOL_VERSION, add a macro below and use that
@@ -340,10 +347,10 @@ public:
     }
 
     /* Attempt to get a conenction to the scheduler.
-    
-       Continue to call this while it returns NULL and timed_out() 
+
+       Continue to call this while it returns NULL and timed_out()
        returns false. If this returns NULL you should wait for either
-       more data on listen_fd() (use select), or a timeout of your own.  
+       more data on listen_fd() (use select), or a timeout of your own.
        */
     MsgChannel *try_get_scheduler();
 

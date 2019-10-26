@@ -22,14 +22,20 @@
 
 #include "exitcode.h"
 
+#ifdef _WIN32
+#else
 #include <sys/types.h>
 #include <sys/wait.h>
+#endif
 
 /*
  Converts exit status from waitpid() to exit status to be returned by the process.
 */
 int shell_exit_status(int status)
 {
+#ifdef _WIN32
+    return status;
+#else
     if (WIFEXITED(status)) {
         return WEXITSTATUS(status);
     } else if (WIFSIGNALED(status)) {
@@ -37,4 +43,5 @@ int shell_exit_status(int status)
     } else {
         return -1;
     }
+#endif
 }

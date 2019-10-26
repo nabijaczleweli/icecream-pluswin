@@ -25,6 +25,29 @@
 #include <config.h>
 
 #include <signal.h>
+#ifdef _WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#undef ERROR
+#define MSG_NOSIGNAL 0
+
+typedef int socklen_t;
+typedef WSAPOLLFD pollfd;
+
+struct sockaddr_un {
+   u_short sun_family;
+   char    sun_path[108];
+};
+
+static int poll(LPWSAPOLLFD fdArray, ULONG fds, INT timeout) {
+    return WSAPoll(fdArray, fds, timeout);
+}
+
+static const char *hstrerror(int err) {
+    return strerror(err);
+}
+
+#else
 #include <sys/types.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
@@ -37,9 +60,12 @@
 #include <sys/socketvar.h>
 #include <netinet/tcp_var.h>
 #endif
+#include <netdb.h>
+#include <net/if.h>
+#include <sys/ioctl.h>
+#endif
 #include <errno.h>
 #include <fcntl.h>
-#include <netdb.h>
 #include <unistd.h>
 #include <errno.h>
 #include <string>
@@ -52,8 +78,6 @@
 #include <cap-ng.h>
 #endif
 #include "getifaddrs.h"
-#include <net/if.h>
-#include <sys/ioctl.h>
 
 #include "logging.h"
 #include "job.h"
@@ -759,7 +783,12 @@ static int prepare_connect(const string &hostname, unsigned short p,
 static bool connect_async(int remote_fd, struct sockaddr *remote_addr, size_t remote_size,
                           int timeout)
 {
+#ifdef _WIN32
+    u_long enable_nonblocking = 1;
+    ioctlsocket(remote_fd, FIONBIO, &enable_nonblocking);
+#else
     fcntl(remote_fd, F_SETFL, O_NONBLOCK);
+#endif
 
     // code majorly derived from lynx's http connect (GPL)
     int status = connect(remote_fd, remote_addr, remote_size);
@@ -809,7 +838,12 @@ static bool connect_async(int remote_fd, struct sockaddr *remote_addr, size_t re
         /*
         **  Make the socket blocking again on good connect.
         */
+#ifdef _WIN32
+        enable_nonblocking = 0;
+        ioctlsocket(remote_fd, FIONBIO, &enable_nonblocking);
+#else
         fcntl(remote_fd, F_SETFL, 0);
+#endif
     }
 
     return true;
@@ -830,7 +864,7 @@ MsgChannel *Service::createChannel(const string &hostname, unsigned short p, int
         }
     } else {
         int i = 2048;
-        setsockopt(remote_fd, SOL_SOCKET, SO_SNDBUF, &i, sizeof(i));
+        setsockopt(remote_fd, SOL_SOCKET, SO_SNDBUF, (const char *) &i, sizeof(i));
 
         if (connect(remote_fd, (struct sockaddr *) &remote_addr, sizeof(remote_addr)) < 0) {
             log_perror_trace("connect");
@@ -848,6 +882,8 @@ MsgChannel *Service::createChannel(const string &hostname, unsigned short p, int
 
 MsgChannel *Service::createChannel(const string &socket_path)
 {
+    log_error() << "createChannel(\"" << socket_path << "\")\n";
+
     int remote_fd;
     struct sockaddr_un remote_addr;
 
@@ -913,7 +949,7 @@ MsgChannel *Service::createChannel(int fd, struct sockaddr *_a, socklen_t _l)
 MsgChannel::MsgChannel(int _fd, struct sockaddr *_a, socklen_t _l, bool text)
     : fd(_fd)
 {
-    addr_len = (sizeof(struct sockaddr) > _l) ? sizeof(struct sockaddr) : _l;
+    addr_len = ((socklen_t) sizeof(struct sockaddr) > _l) ? sizeof(struct sockaddr) : _l;
 
     if (addr_len && _a) {
         addr = (struct sockaddr *)malloc(addr_len);
@@ -977,13 +1013,23 @@ MsgChannel::MsgChannel(int _fd, struct sockaddr *_a, socklen_t _l, bool text)
 #endif
     }
 
+#ifdef _WIN32
+    u_long enable_nonblocking = 1;
+    if (ioctlsocket(fd, FIONBIO, &enable_nonblocking) < 0) {
+#else
     if (fcntl(fd, F_SETFL, O_NONBLOCK) < 0) {
+#endif
         log_perror("MsgChannel fcntl()");
     }
 
+#ifdef _WIN32
+    log_error() << "MsgChannel(): fcntl(fd, F_SETFD, FD_CLOEXEC)\n";
+    log_error() << "MsgChannel(): fcntl(fd, F_SETFD, FD_CLOEXEC)\n";
+#else
     if (fcntl(fd, F_SETFD, FD_CLOEXEC) < 0) {
         log_perror("MsgChannel fcntl() 2");
     }
+#endif
 
     if (text_based) {
         instate = NEED_LEN;
@@ -1086,7 +1132,7 @@ void MsgChannel::setBulkTransfer()
     setsockopt(fd, IPPROTO_TCP, TCP_CORK, (char *) &i, sizeof(i));
 #endif
     i = 65536;
-    setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &i, sizeof(i));
+    setsockopt(fd, SOL_SOCKET, SO_SNDBUF, (const char *) &i, sizeof(i));
 }
 
 /* This waits indefinitely (well, TIMEOUT seconds) for a complete
@@ -1434,6 +1480,9 @@ static int open_send_broadcast(int port, const char* buf, int size)
         return -1;
     }
 
+#ifdef _WIN32
+    log_error() << "open_send_broadcast(): fcntl(fd, F_SETFD, FD_CLOEXEC)\n";
+#else
     if (fcntl(ask_fd, F_SETFD, FD_CLOEXEC) < 0) {
         log_perror("open_send_broadcast fcntl");
         if (-1 == close(ask_fd)){
@@ -1441,10 +1490,11 @@ static int open_send_broadcast(int port, const char* buf, int size)
         }
         return -1;
     }
+#endif
 
     int optval = 1;
 
-    if (setsockopt(ask_fd, SOL_SOCKET, SO_BROADCAST, &optval, sizeof(optval)) < 0) {
+    if (setsockopt(ask_fd, SOL_SOCKET, SO_BROADCAST, (const char *) &optval, sizeof(optval)) < 0) {
         log_perror("open_send_broadcast setsockopt");
         if (-1 == close(ask_fd)){
             log_perror("close failed");
@@ -1600,7 +1650,12 @@ void DiscoverSched::attempt_scheduler_connect()
     log_info() << "scheduler is on " << schedname << ":" << sport << " (net " << netname << ")" << endl;
 
     if ((ask_fd = prepare_connect(schedname, sport, remote_addr)) >= 0) {
+#ifdef _WIN32
+        u_long enable_nonblocking = 1;
+        ioctlsocket(ask_fd, FIONBIO, &enable_nonblocking);
+#else
         fcntl(ask_fd, F_SETFL, O_NONBLOCK);
+#endif
     }
 }
 
@@ -2391,8 +2446,12 @@ LoginMsg::LoginMsg(unsigned int myport, const std::string &_nodename, const std:
 #ifdef HAVE_LIBCAP_NG
     chroot_possible = capng_have_capability(CAPNG_EFFECTIVE, CAP_SYS_CHROOT);
 #else
+#ifdef _WIN32
+    chroot_possible = false;
+#else
     // check if we're root
     chroot_possible = (geteuid() == 0);
+#endif
 #endif
 }
 

@@ -102,6 +102,39 @@ int dcc_ncpus(int *ncpus)
     return EXIT_DISTCC_FAILED;
 }
 
+#elif defined(_WIN32)
+
+/* https://github.com/ThePhD/infoware/blob/db3f805a4462bef33379a087771caa4132079c5a/src/cpu/quantities_cache/quantities_cache_windows.cpp */
+
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+
+int dcc_ncpus(int *ncpus)
+{
+    SYSTEM_LOGICAL_PROCESSOR_INFORMATION * buffer;
+
+    DWORD byte_count = 0;
+    GetLogicalProcessorInformation(NULL, &byte_count);
+    buffer = malloc(byte_count);
+    if(!buffer) {
+        return EXIT_DISTCC_FAILED;
+    }
+    GetLogicalProcessorInformation(buffer, &byte_count);
+
+    *ncpus = 0;
+    for(DWORD i = 0; i < byte_count / sizeof(SYSTEM_LOGICAL_PROCESSOR_INFORMATION); ++i) {
+        if(buffer[i].Relationship == RelationProcessorCore) {
+            while(buffer[i].ProcessorMask) {
+                *ncpus += buffer[i].ProcessorMask & 1;
+                buffer[i].ProcessorMask >>= 1;
+            }
+        }
+    }
+
+    free(buffer);
+    return 0;
+}
+
 #else /* every other system */
 
 /*

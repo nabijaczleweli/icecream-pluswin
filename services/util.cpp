@@ -130,7 +130,7 @@ bool pollfd_is_set(const vector<pollfd>& pollfds, int fd, int flags, bool check_
 {
     for( size_t i = 0; i < pollfds.size(); ++i )
     {
-        if( pollfds[ i ].fd == fd )
+        if( pollfds[ i ].fd == (decltype(pollfds[ i ].fd)) fd )
         {
             if( pollfds[ i ].revents & flags )
                 return true;

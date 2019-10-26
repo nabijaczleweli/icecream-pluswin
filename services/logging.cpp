@@ -30,6 +30,10 @@
 #ifdef __linux__
 #include <dlfcn.h>
 #endif
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#endif
 
 using namespace std;
 
@@ -78,7 +82,15 @@ streamsize ofdbuf::xsputn( const char* c, streamsize n )
 
 ostream* ccache_stream( int fd )
 {
+#ifdef _WIN32
+    BY_HANDLE_FILE_INFORMATION fd_info;
+    int status = -1;
+    if( GetFileInformationByHandle( (HANDLE) (INT_PTR) fd, &fd_info ) != 0 && ( fd_info.dwFileAttributes & FILE_ATTRIBUTE_READONLY ) != 0 ) {
+        status = O_RDWR;
+    }
+#else
     int status = fcntl( fd, F_GETFL );
+#endif
     if( status < 0 || ( status & ( O_WRONLY | O_RDWR )) == 0 ) {
         // As logging is not set up yet, this will log to stderr.
         log_warning() << "UNCACHED_ERR_FD provides an invalid file descriptor, using stderr" << endl;
@@ -154,7 +166,11 @@ void setup_debug(int level, const string &filename, const string &prefix)
         logfile_error = &logfile_null;
     }
 
+#ifdef _WIN32
+    signal(CTRL_CLOSE_EVENT, reset_debug_signal_handler);
+#else
     signal(SIGHUP, reset_debug_signal_handler);
+#endif
 }
 
 void reset_debug()

@@ -31,10 +31,15 @@
 
 #include <string>
 
+#ifdef _WIN32
+#include <winsock2.h>
+#undef interface
+#else
 #include <sys/types.h>
 
 #include <sys/socket.h>
 #include <net/if.h>
+#endif
 
 #ifndef IFF_POINTOPOINT
 #   define IFF_POINTOPOINT 0x10
@@ -48,8 +53,6 @@
 #define kde_ifaddrs ifaddrs
 
 #else
-
-#include <sys/socket.h>
 
 /* The `getifaddrs' function generates a linked list of these structures.
    Each element of the list describes one network interface.  */
